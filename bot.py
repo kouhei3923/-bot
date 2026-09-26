@@ -79,7 +79,8 @@ def get_channel():
 
 
 async def post_poll(channel):
-    monday = datetime.datetime.now(JST).date()
+    today = datetime.datetime.now(JST).date()
+    monday = today - datetime.timedelta(days=today.weekday())
 
     lines = [
         "@everyone",
