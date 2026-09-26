@@ -34,7 +34,7 @@ STATE_PATH = os.path.join(os.path.dirname(__file__), "data", "state.json")
 DEFAULT_STATE = {
     "channel_id": None,
     "monday": None,
-    "last_message_id": None,
+    "poll_message_ids": {},
     "decided_date": None,
     "current_week_off": False,
     "off_week_requested": False,
@@ -82,33 +82,31 @@ async def post_poll(channel):
     today = datetime.datetime.now(JST).date()
     monday = today - datetime.timedelta(days=today.weekday())
 
-    lines = [
+    intro_lines = [
         "@everyone",
         "今週のカスタムアンケートです。参加可能な日にリアクション押してください！都合が悪い場合は「来れない」にリアクションをお願いします",
         "",
         "回答期限　毎週水曜日の23:59",
         "",
         "無回答＆開催日決定後のリアクション取り消しや追加は禁止です‼️",
-        "",
     ]
-    for meta in DAY_META:
-        day = monday + datetime.timedelta(days=meta["offset"])
-        lines.append(f"{day.month}/{day.day}（{meta['label']}）")
-        lines.append(meta["emoji"])
-        lines.append("")
-    lines.append("来れない")
-    lines.append(CANT_COME_EMOJI)
-
-    message = await channel.send(
-        "\n".join(lines),
+    await channel.send(
+        "\n".join(intro_lines),
         allowed_mentions=discord.AllowedMentions(everyone=True),
     )
+
+    poll_message_ids = {}
     for meta in DAY_META:
-        await message.add_reaction(meta["emoji"])
-    await message.add_reaction(CANT_COME_EMOJI)
+        day = monday + datetime.timedelta(days=meta["offset"])
+        day_message = await channel.send(f"{day.month}/{day.day}（{meta['label']}）\n{meta['emoji']}")
+        await day_message.add_reaction(meta["emoji"])
+        poll_message_ids[meta["emoji"]] = day_message.id
+
+    cant_come_message = await channel.send(f"来れない\n{CANT_COME_EMOJI}")
+    await cant_come_message.add_reaction(CANT_COME_EMOJI)
 
     state["monday"] = monday.isoformat()
-    state["last_message_id"] = message.id
+    state["poll_message_ids"] = poll_message_ids
     state["decided_date"] = None
     state["current_week_off"] = False
     save_state(state)
@@ -123,7 +121,7 @@ async def post_poll_or_offweek():
         state["off_week_requested"] = False
         state["current_week_off"] = True
         state["decided_date"] = None
-        state["last_message_id"] = None
+        state["poll_message_ids"] = {}
         state["monday"] = datetime.datetime.now(JST).date().isoformat()
         save_state(state)
         await channel.send(
@@ -136,7 +134,7 @@ async def post_poll_or_offweek():
 
 
 async def post_reminder():
-    if state["current_week_off"] or not state["last_message_id"]:
+    if state["current_week_off"] or not state.get("poll_message_ids"):
         return
     channel = get_channel()
     if channel is None:
@@ -148,15 +146,10 @@ async def post_reminder():
 
 
 async def announce_result():
-    if state["current_week_off"] or not state["last_message_id"]:
+    if state["current_week_off"] or not state.get("poll_message_ids"):
         return
     channel = get_channel()
     if channel is None:
-        return
-
-    try:
-        message = await channel.fetch_message(state["last_message_id"])
-    except discord.NotFound:
         return
 
     monday_str = state.get("monday")
@@ -164,7 +157,14 @@ async def announce_result():
 
     counts = {}
     for meta in DAY_META:
-        reaction = discord.utils.get(message.reactions, emoji=meta["emoji"])
+        msg_id = state["poll_message_ids"].get(meta["emoji"])
+        message = None
+        if msg_id:
+            try:
+                message = await channel.fetch_message(msg_id)
+            except discord.NotFound:
+                message = None
+        reaction = discord.utils.get(message.reactions, emoji=meta["emoji"]) if message else None
         counts[meta["emoji"]] = max(reaction.count - 1, 0) if reaction else 0
 
     max_count = max(counts.values()) if counts else 0
@@ -286,7 +286,7 @@ async def on_message(message: discord.Message):
     if "今週休み" not in message.content:
         return
 
-    if state["last_message_id"] and not state["current_week_off"]:
+    if state.get("poll_message_ids") and not state["current_week_off"]:
         state["current_week_off"] = True
         state["decided_date"] = None
         save_state(state)
