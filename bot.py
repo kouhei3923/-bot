@@ -98,11 +98,11 @@ async def post_poll(channel):
     poll_message_ids = {}
     for meta in DAY_META:
         day = monday + datetime.timedelta(days=meta["offset"])
-        day_message = await channel.send(f"{day.month}/{day.day}（{meta['label']}）\n{meta['emoji']}")
+        day_message = await channel.send(f"{day.month}/{day.day}（{meta['label']}）")
         await day_message.add_reaction(meta["emoji"])
         poll_message_ids[meta["emoji"]] = day_message.id
 
-    cant_come_message = await channel.send(f"来れない\n{CANT_COME_EMOJI}")
+    cant_come_message = await channel.send("来れない")
     await cant_come_message.add_reaction(CANT_COME_EMOJI)
 
     state["monday"] = monday.isoformat()
