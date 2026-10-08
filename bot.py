@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import traceback
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -17,7 +18,6 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID") or "0")
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
 
@@ -28,7 +28,8 @@ DAY_META = [
 ]
 CANT_COME_EMOJI = "❌"
 
-# 最多リアクション数がこの人数を超えないと開催せず見送りにする（6以下で見送り、7以上で開催）
+# 最多リアクション数がこの人数を超えないと開催せず見送りにする（既定: 6以下で見送り、7以上で開催）
+# サーバーごとに /custom_setup で変更できる
 MIN_PARTICIPANTS = 6
 
 # 定期ジョブの実行開始時刻（JST）。この時刻を過ぎてから、その日の分が未実行なら実行する
@@ -36,9 +37,18 @@ SCHEDULE_HOUR = 9
 # 1つのジョブが失敗し続けたときに、1日に再試行する最大回数
 MAX_ATTEMPTS = 3
 
+# 発表文の初期設定をサーバー固有に持たせたい場合（キーはサーバーID）
+PRESET_SETTINGS = {
+    1366728872380469268: {  # 悠 HARU
+        "meeting_time": "22:30",
+        "meeting_place": "雑談vc",
+        "contact_channel_id": 1367045763837722664,
+    },
+}
+
 STATE_PATH = os.path.join(os.path.dirname(__file__), "data", "state.json")
 
-DEFAULT_STATE = {
+DEFAULT_GUILD_STATE = {
     "channel_id": None,
     "monday": None,
     "poll_message_ids": {},
@@ -46,16 +56,31 @@ DEFAULT_STATE = {
     "current_week_off": False,
     "skip_monday": None,
     "last_run": {},
+    "settings": {},
 }
+# 1サーバー専用だった旧形式の状態キー（起動時にサーバーごとの形式へ移行する）
+LEGACY_KEYS = (
+    "channel_id",
+    "monday",
+    "poll_message_ids",
+    "decided_date",
+    "current_week_off",
+    "skip_monday",
+    "last_run",
+)
 
 
 def load_state() -> dict:
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return {**copy.deepcopy(DEFAULT_STATE), **data}
     except (FileNotFoundError, json.JSONDecodeError):
-        return copy.deepcopy(DEFAULT_STATE)
+        return {"guilds": {}}
+    state = {"guilds": data.get("guilds", {})}
+    legacy = data.get("_legacy") or {k: data[k] for k in LEGACY_KEYS if k in data}
+    if legacy.get("channel_id"):
+        state["_legacy"] = legacy
+    return state
 
 
 def save_state(state: dict):
@@ -71,33 +96,74 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 state = load_state()
 
 
-def get_channel_id():
-    return state.get("channel_id") or CHANNEL_ID or None
+def guild_state(guild_id) -> dict:
+    g = state["guilds"].setdefault(str(guild_id), {})
+    for key, value in DEFAULT_GUILD_STATE.items():
+        g.setdefault(key, copy.deepcopy(value))
+    return g
 
 
-def get_channel():
-    channel_id = get_channel_id()
-    if not channel_id:
-        print("[custom-schedule-bot] 投稿先チャンネルが未設定です。Botをメンションして「ここに投稿」と送るか、.envのCHANNEL_IDを設定してください。")
-        return None
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        print(f"[custom-schedule-bot] チャンネル {channel_id} が見つかりません")
-    return channel
+def effective_settings(guild_id, g: dict) -> dict:
+    return {"min_participants": MIN_PARTICIPANTS, **PRESET_SETTINGS.get(int(guild_id), {}), **g["settings"]}
 
 
-def configured_guild_id():
-    channel_id = get_channel_id()
-    channel = bot.get_channel(channel_id) if channel_id else None
-    guild = getattr(channel, "guild", None)
-    return guild.id if guild else None
+def guild_channel(g: dict):
+    channel_id = g.get("channel_id")
+    return bot.get_channel(channel_id) if channel_id else None
 
 
 def week_monday(today: datetime.date) -> datetime.date:
     return today - datetime.timedelta(days=today.weekday())
 
 
-async def post_poll(channel):
+def next_monday(today: datetime.date) -> datetime.date:
+    """今日より後で最初の月曜日（今日が月曜なら7日後）。"""
+    return today + datetime.timedelta(days=7 - today.weekday())
+
+
+def migrate_legacy():
+    legacy = state.get("_legacy")
+    if not legacy:
+        return
+    channel = bot.get_channel(legacy.get("channel_id"))
+    guild = getattr(channel, "guild", None)
+    if guild is None:
+        print("[custom-schedule-bot] 旧形式の設定の移行先サーバーが見つかりません。")
+        return
+    g = guild_state(guild.id)
+    if g["channel_id"] is None:
+        for key in LEGACY_KEYS:
+            if key in legacy:
+                g[key] = legacy[key]
+    del state["_legacy"]
+    save_state(state)
+    print(f"[custom-schedule-bot] 旧形式の設定をサーバー {guild.name}({guild.id}) へ移行しました。")
+
+
+def build_announce_text(guild_id, g: dict, label: str) -> str:
+    s = effective_settings(guild_id, g)
+    parts = []
+    meeting_time, meeting_place = s.get("meeting_time"), s.get("meeting_place")
+    if meeting_time and meeting_place:
+        parts.append(f"{meeting_time}に{meeting_place}に集合してください！")
+    elif meeting_time:
+        parts.append(f"{meeting_time}に集合してください！")
+    elif meeting_place:
+        parts.append(f"{meeting_place}に集合してください！")
+    contact_channel_id = s.get("contact_channel_id")
+    if contact_channel_id:
+        parts.append(
+            "開催日が決定したあとに都合がつかなくなったり、"
+            f"遅れる場合は<#{contact_channel_id}> に必ず報告をお願いします‼️"
+        )
+    text = f"@everyone \n今週のカスタムは{label}に開催します🌟"
+    if parts:
+        text += "\n" + "".join(parts)
+    return text
+
+
+async def post_poll(gid: str, channel):
+    g = guild_state(gid)
     today = datetime.datetime.now(JST).date()
     monday = week_monday(today)
 
@@ -124,27 +190,28 @@ async def post_poll(channel):
     cant_come_message = await channel.send("来れない")
     await cant_come_message.add_reaction(CANT_COME_EMOJI)
 
-    state["monday"] = monday.isoformat()
-    state["poll_message_ids"] = poll_message_ids
-    state["decided_date"] = None
-    state["current_week_off"] = False
+    g["monday"] = monday.isoformat()
+    g["poll_message_ids"] = poll_message_ids
+    g["decided_date"] = None
+    g["current_week_off"] = False
     save_state(state)
 
 
-async def post_poll_or_offweek():
-    channel = get_channel()
+async def post_poll_or_offweek(gid: str):
+    g = guild_state(gid)
+    channel = guild_channel(g)
     if channel is None:
         return
 
     this_monday = week_monday(datetime.datetime.now(JST).date()).isoformat()
-    skip_monday = state.get("skip_monday")
+    skip_monday = g.get("skip_monday")
     if skip_monday and skip_monday <= this_monday:
-        state["skip_monday"] = None
+        g["skip_monday"] = None
     if skip_monday == this_monday:
-        state["current_week_off"] = True
-        state["decided_date"] = None
-        state["poll_message_ids"] = {}
-        state["monday"] = this_monday
+        g["current_week_off"] = True
+        g["decided_date"] = None
+        g["poll_message_ids"] = {}
+        g["monday"] = this_monday
         save_state(state)
         await channel.send(
             "@everyone 今週のカスタムはお休みです。",
@@ -152,13 +219,14 @@ async def post_poll_or_offweek():
         )
         return
 
-    await post_poll(channel)
+    await post_poll(gid, channel)
 
 
-async def post_reminder():
-    if state["current_week_off"] or not state.get("poll_message_ids"):
+async def post_reminder(gid: str):
+    g = guild_state(gid)
+    if g["current_week_off"] or not g.get("poll_message_ids"):
         return
-    channel = get_channel()
+    channel = guild_channel(g)
     if channel is None:
         return
     await channel.send(
@@ -174,19 +242,20 @@ async def count_votes(message: discord.Message, emoji: str) -> int:
     return sum([1 async for user in reaction.users() if not user.bot])
 
 
-async def announce_result():
-    if state["current_week_off"] or not state.get("poll_message_ids"):
+async def announce_result(gid: str):
+    g = guild_state(gid)
+    if g["current_week_off"] or not g.get("poll_message_ids"):
         return
-    channel = get_channel()
+    channel = guild_channel(g)
     if channel is None:
         return
 
-    monday_str = state.get("monday")
+    monday_str = g.get("monday")
     monday = datetime.date.fromisoformat(monday_str) if monday_str else None
 
     counts = {}
     for meta in DAY_META:
-        msg_id = state["poll_message_ids"].get(meta["emoji"])
+        msg_id = g["poll_message_ids"].get(meta["emoji"])
         message = None
         if msg_id:
             try:
@@ -202,10 +271,11 @@ async def announce_result():
         counts[meta["emoji"]] = await count_votes(message, meta["emoji"])
 
     max_count = max(counts.values()) if counts else 0
+    min_participants = effective_settings(gid, g)["min_participants"]
 
-    if max_count <= MIN_PARTICIPANTS:
-        await channel.send(f"投票が{MIN_PARTICIPANTS}人以下だったため、今週のカスタムはお休みです。")
-        state["decided_date"] = None
+    if max_count <= min_participants:
+        await channel.send(f"投票が{min_participants}人以下だったため、今週のカスタムはお休みです。")
+        g["decided_date"] = None
         save_state(state)
         return
 
@@ -214,29 +284,28 @@ async def announce_result():
     label = f"{day.month}月{day.day}日({best_meta['label']})" if day else best_meta["label"]
 
     await channel.send(
-        f"@everyone \n今週のカスタムは{label}に開催します🌟\n"
-        "22:30に雑談vcに集合してください！開催日が決定したあとに都合がつかなくなったり、"
-        "遅れる場合は<#1367045763837722664> に必ず報告をお願いします‼️",
+        build_announce_text(gid, g, label),
         allowed_mentions=discord.AllowedMentions(everyone=True),
     )
-    state["decided_date"] = day.isoformat() if day else None
+    g["decided_date"] = day.isoformat() if day else None
     save_state(state)
 
 
-async def check_day_mention():
-    if state["current_week_off"] or not state["decided_date"]:
+async def check_day_mention(gid: str):
+    g = guild_state(gid)
+    if g["current_week_off"] or not g["decided_date"]:
         return
     today = datetime.datetime.now(JST).date().isoformat()
-    if today != state["decided_date"]:
+    if today != g["decided_date"]:
         return
-    channel = get_channel()
+    channel = guild_channel(g)
     if channel is None:
         return
     await channel.send(
         "@everyone 本日カスタムです！",
         allowed_mentions=discord.AllowedMentions(everyone=True),
     )
-    state["decided_date"] = None  # 同日中の二重投稿を防止
+    g["decided_date"] = None  # 同日中の二重投稿を防止
     save_state(state)
 
 
@@ -250,37 +319,37 @@ JOBS = [
 _attempts = {}
 
 
-# 1分ごとに「今日の分で未実行のジョブ」を確認して実行する。
+# 1分ごとに、投稿先を設定済みの各サーバーについて「今日の分で未実行のジョブ」を確認して実行する。
 # 9:00ちょうどにBotが落ちていても、復帰後にその日のうちに実行される。
 @tasks.loop(minutes=1)
 async def scheduler_job():
     now = datetime.datetime.now(JST)
     if now.hour < SCHEDULE_HOUR:
         return
-    channel_id = get_channel_id()
-    if not channel_id or bot.get_channel(channel_id) is None:
-        return
-
     today = now.date().isoformat()
-    for name, weekday, func in JOBS:
-        if weekday is not None and now.weekday() != weekday:
+
+    for gid, g in list(state["guilds"].items()):
+        if guild_channel(g) is None:
             continue
-        if state["last_run"].get(name) == today:
-            continue
-        attempt_date, count = _attempts.get(name, (None, 0))
-        if attempt_date != today:
-            count = 0
-        if count >= MAX_ATTEMPTS:
-            continue
-        _attempts[name] = (today, count + 1)
-        try:
-            await func()
-        except Exception:
-            print(f"[custom-schedule-bot] ジョブ {name} が失敗しました（{count + 1}/{MAX_ATTEMPTS}回目）")
-            traceback.print_exc()
-            continue
-        state["last_run"][name] = today
-        save_state(state)
+        for name, weekday, func in JOBS:
+            if weekday is not None and now.weekday() != weekday:
+                continue
+            if g["last_run"].get(name) == today:
+                continue
+            attempt_date, count = _attempts.get((gid, name), (None, 0))
+            if attempt_date != today:
+                count = 0
+            if count >= MAX_ATTEMPTS:
+                continue
+            _attempts[(gid, name)] = (today, count + 1)
+            try:
+                await func(gid)
+            except Exception:
+                print(f"[custom-schedule-bot] サーバー{gid}のジョブ {name} が失敗しました（{count + 1}/{MAX_ATTEMPTS}回目）")
+                traceback.print_exc()
+                continue
+            g["last_run"][name] = today
+            save_state(state)
 
 
 @scheduler_job.before_loop
@@ -300,19 +369,17 @@ async def on_scheduler_error(error):
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     print("------")
+    migrate_legacy()
     if not scheduler_job.is_running():
         scheduler_job.start()
     synced = await bot.tree.sync()
     print(f"Synced {len(synced)} slash command(s).")
 
 
-def _has_manage_guild(message: discord.Message) -> bool:
-    return bool(message.guild) and message.author.guild_permissions.manage_guild
-
-
-def next_monday(today: datetime.date) -> datetime.date:
-    """今日より後で最初の月曜日（今日が月曜なら7日後）。"""
-    return today + datetime.timedelta(days=7 - today.weekday())
+async def _is_admin(message: discord.Message) -> bool:
+    if message.guild is not None and message.author.guild_permissions.manage_guild:
+        return True
+    return await bot.is_owner(message.author)
 
 
 @bot.event
@@ -325,30 +392,26 @@ async def on_message(message: discord.Message):
         return
 
     if "ここに投稿" in message.content:
-        is_owner = await bot.is_owner(message.author)
-        if not (_has_manage_guild(message) or is_owner):
+        if not await _is_admin(message):
             await message.reply("❌ このコマンドはサーバー管理権限を持つ人のみ実行できます。")
             return
-        current_guild_id = configured_guild_id()
-        if current_guild_id and message.guild.id != current_guild_id and not is_owner:
-            await message.reply("❌ 投稿先は別のサーバーに設定されています。切り替えはBotの所有者のみ可能です。")
-            return
-        state["channel_id"] = message.channel.id
+        g = guild_state(message.guild.id)
+        g["channel_id"] = message.channel.id
         save_state(state)
         await message.reply(f"✅ 今後の投稿はこのチャンネル（{message.channel.mention}）に切り替えました。")
         return
 
-    channel_id = get_channel_id()
-    if channel_id and message.channel.id != channel_id:
-        return
     if "来週休み" not in message.content:
         return
-    if not (_has_manage_guild(message) or await bot.is_owner(message.author)):
+    g = guild_state(message.guild.id)
+    if g["channel_id"] and message.channel.id != g["channel_id"]:
+        return
+    if not await _is_admin(message):
         await message.reply("❌ このコマンドはサーバー管理権限を持つ人のみ実行できます。")
         return
 
     target = next_monday(datetime.datetime.now(JST).date())
-    state["skip_monday"] = target.isoformat()
+    g["skip_monday"] = target.isoformat()
     save_state(state)
     await message.reply(
         f"承知しました！{target.month}/{target.day}（月）の週のカスタムはお休みとして扱います。"
@@ -356,19 +419,16 @@ async def on_message(message: discord.Message):
     )
 
 
-async def _guard(interaction: discord.Interaction) -> bool:
-    """投稿先チャンネルがあるサーバーでの操作だけを許可する。deferした後に呼ぶ。"""
-    channel = get_channel()
-    if channel is None:
+async def _guard(interaction: discord.Interaction):
+    """このサーバーの投稿先が設定済みなら、そのサーバーIDを返す。deferした後に呼ぶ。"""
+    gid = str(interaction.guild_id)
+    if guild_channel(guild_state(gid)) is None:
         await interaction.followup.send(
-            "❌ 投稿先チャンネルが見つかりません。Botをメンションして「ここに投稿」と送ってください。",
+            "❌ 投稿先チャンネルが設定されていません。投稿したいチャンネルでBotをメンションして「ここに投稿」と送ってください。",
             ephemeral=True,
         )
-        return False
-    if interaction.guild_id != channel.guild.id:
-        await interaction.followup.send("❌ このサーバーは投稿先ではないため使えません。", ephemeral=True)
-        return False
-    return True
+        return None
+    return gid
 
 
 @bot.tree.command(name="custom_post_now", description="【管理者用】カスタムアンケートを今すぐ投稿します")
@@ -376,9 +436,10 @@ async def _guard(interaction: discord.Interaction) -> bool:
 @app_commands.checks.has_permissions(manage_guild=True)
 async def custom_post_now(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    if not await _guard(interaction):
+    gid = await _guard(interaction)
+    if gid is None:
         return
-    await post_poll(get_channel())
+    await post_poll(gid, guild_channel(guild_state(gid)))
     await interaction.followup.send("✅ 投稿しました。", ephemeral=True)
 
 
@@ -387,9 +448,10 @@ async def custom_post_now(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(manage_guild=True)
 async def custom_remind_now(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    if not await _guard(interaction):
+    gid = await _guard(interaction)
+    if gid is None:
         return
-    await post_reminder()
+    await post_reminder(gid)
     await interaction.followup.send("✅ リマインドしました。", ephemeral=True)
 
 
@@ -398,9 +460,10 @@ async def custom_remind_now(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(manage_guild=True)
 async def custom_announce_now(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    if not await _guard(interaction):
+    gid = await _guard(interaction)
+    if gid is None:
         return
-    await announce_result()
+    await announce_result(gid)
     await interaction.followup.send("✅ 発表しました。", ephemeral=True)
 
 
@@ -409,10 +472,95 @@ async def custom_announce_now(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(manage_guild=True)
 async def custom_daycheck_now(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    if not await _guard(interaction):
+    gid = await _guard(interaction)
+    if gid is None:
         return
-    await check_day_mention()
+    await check_day_mention(gid)
     await interaction.followup.send("✅ 確認しました。", ephemeral=True)
+
+
+def _format_settings(gid: str) -> str:
+    g = guild_state(gid)
+    s = effective_settings(gid, g)
+    channel = guild_channel(g)
+    contact = f"<#{s['contact_channel_id']}>" if s.get("contact_channel_id") else "なし"
+    return (
+        f"投稿先チャンネル: {channel.mention if channel else '未設定（Botをメンションして「ここに投稿」）'}\n"
+        f"集合時間: {s.get('meeting_time') or 'なし'}\n"
+        f"集合場所: {s.get('meeting_place') or 'なし'}\n"
+        f"連絡先チャンネル: {contact}\n"
+        f"最低人数: {s['min_participants']}人（この人数以下だとお休み）"
+    )
+
+
+def _clean_text_setting(value: str):
+    value = value.strip()
+    return None if value in ("", "なし") else value
+
+
+@bot.tree.command(
+    name="custom_setup",
+    description="【管理者用】開催日の発表文などの設定を変更します（指定しない項目は変わりません）",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    meeting_time="集合時間（例: 22:30）。「なし」で削除",
+    meeting_place="集合場所（例: 雑談vc）。「なし」で削除",
+    contact_channel="遅れる・欠席するときの連絡先チャンネル",
+    clear_contact="連絡先チャンネルの設定を削除する",
+    min_participants="開催に必要な最低人数（この人数以下だとお休み）",
+    reset="すべての設定を初期値に戻す",
+)
+@app_commands.rename(
+    meeting_time="集合時間",
+    meeting_place="集合場所",
+    contact_channel="連絡先チャンネル",
+    clear_contact="連絡先を削除",
+    min_participants="最低人数",
+    reset="初期化",
+)
+async def custom_setup(
+    interaction: discord.Interaction,
+    meeting_time: Optional[str] = None,
+    meeting_place: Optional[str] = None,
+    contact_channel: Optional[discord.TextChannel] = None,
+    clear_contact: bool = False,
+    min_participants: Optional[app_commands.Range[int, 0, 1000]] = None,
+    reset: bool = False,
+):
+    gid = str(interaction.guild_id)
+    g = guild_state(gid)
+
+    for value in (meeting_time, meeting_place):
+        if value is not None and len(value) > 50:
+            await interaction.response.send_message("❌ 文字数が長すぎます（50文字まで）。", ephemeral=True)
+            return
+
+    changed = False
+    if reset:
+        g["settings"] = {}
+        changed = True
+    if meeting_time is not None:
+        g["settings"]["meeting_time"] = _clean_text_setting(meeting_time)
+        changed = True
+    if meeting_place is not None:
+        g["settings"]["meeting_place"] = _clean_text_setting(meeting_place)
+        changed = True
+    if contact_channel is not None:
+        g["settings"]["contact_channel_id"] = contact_channel.id
+        changed = True
+    elif clear_contact:
+        g["settings"]["contact_channel_id"] = None
+        changed = True
+    if min_participants is not None:
+        g["settings"]["min_participants"] = min_participants
+        changed = True
+    if changed:
+        save_state(state)
+
+    title = "✅ 設定を更新しました。" if changed else "現在の設定です。"
+    await interaction.response.send_message(f"{title}\n{_format_settings(gid)}", ephemeral=True)
 
 
 @bot.tree.error
@@ -433,10 +581,5 @@ if __name__ == "__main__":
         raise RuntimeError(
             "DISCORD_TOKEN が設定されていません。.env ファイルを作成し、"
             "DISCORD_TOKEN=あなたのトークン を記述してください。"
-        )
-    if not CHANNEL_ID and not state.get("channel_id"):
-        print(
-            "[custom-schedule-bot] 投稿先チャンネル未設定です。起動後にBotをメンションして「ここに投稿」"
-            "と送るか、.envのCHANNEL_IDを設定してください。"
         )
     bot.run(TOKEN)
