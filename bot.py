@@ -343,6 +343,9 @@ async def on_message(message: discord.Message):
         return
     if "来週休み" not in message.content:
         return
+    if not (_has_manage_guild(message) or await bot.is_owner(message.author)):
+        await message.reply("❌ このコマンドはサーバー管理権限を持つ人のみ実行できます。")
+        return
 
     target = next_monday(datetime.datetime.now(JST).date())
     state["skip_monday"] = target.isoformat()
