@@ -34,6 +34,8 @@ MIN_PARTICIPANTS = 6
 
 # 定期ジョブの実行開始時刻（JST）。この時刻を過ぎてから、その日の分が未実行なら実行する
 SCHEDULE_HOUR = 9
+# 開催日当日の告知（「本日カスタム開催日です」）を投稿する時刻（JST）
+DAY_MENTION_HOUR = 18
 # 1つのジョブが失敗し続けたときに、1日に再試行する最大回数
 MAX_ATTEMPTS = 3
 
@@ -301,20 +303,24 @@ async def check_day_mention(gid: str):
     channel = guild_channel(g)
     if channel is None:
         return
+    text = "@everyone \n本日カスタム開催日です‼️参加予定の方は忘れずにお願いします🙏🏻"
+    contact_channel_id = effective_settings(gid, g).get("contact_channel_id")
+    if contact_channel_id:
+        text += f"\n遅れる人や来れるようになった人は<#{contact_channel_id}> に報告ください"
     await channel.send(
-        "@everyone 本日カスタムです！",
+        text,
         allowed_mentions=discord.AllowedMentions(everyone=True),
     )
     g["decided_date"] = None  # 同日中の二重投稿を防止
     save_state(state)
 
 
-# (ジョブ名, 実行する曜日(0=月。Noneは毎日), 処理)
+# (ジョブ名, 実行する曜日(0=月。Noneは毎日), 実行開始時刻(JSTの時), 処理)
 JOBS = [
-    ("post_poll", 0, post_poll_or_offweek),  # 月曜: アンケート投稿（休み申請があればお休み投稿）
-    ("post_reminder", 2, post_reminder),  # 水曜: 本日締切のリマインド
-    ("announce_result", 3, announce_result),  # 木曜: 集計して開催日を発表
-    ("check_day_mention", None, check_day_mention),  # 毎日: 開催日当日なら告知
+    ("post_poll", 0, SCHEDULE_HOUR, post_poll_or_offweek),  # 月曜: アンケート投稿（休み申請があればお休み投稿）
+    ("post_reminder", 2, SCHEDULE_HOUR, post_reminder),  # 水曜: 本日締切のリマインド
+    ("announce_result", 3, SCHEDULE_HOUR, announce_result),  # 木曜: 集計して開催日を発表
+    ("check_day_mention", None, DAY_MENTION_HOUR, check_day_mention),  # 毎日: 開催日当日なら告知
 ]
 _attempts = {}
 
@@ -324,15 +330,15 @@ _attempts = {}
 @tasks.loop(minutes=1)
 async def scheduler_job():
     now = datetime.datetime.now(JST)
-    if now.hour < SCHEDULE_HOUR:
-        return
     today = now.date().isoformat()
 
     for gid, g in list(state["guilds"].items()):
         if guild_channel(g) is None:
             continue
-        for name, weekday, func in JOBS:
+        for name, weekday, hour, func in JOBS:
             if weekday is not None and now.weekday() != weekday:
+                continue
+            if now.hour < hour:
                 continue
             if g["last_run"].get(name) == today:
                 continue
