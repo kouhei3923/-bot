@@ -24,7 +24,13 @@ discord.py製の日程調整専用Bot。複数のサーバーに入れて使え�
 
 ## Botを自分のサーバーに入れる
 
-Botの所有者から招待URLをもらい、サーバー管理権限のあるアカウントで開いて追加してください。追加後、投稿したいチャンネルで「ここに投稿」を送れば完了です。必要な権限は `Send Messages` `Mention Everyone` `Add Reactions` `Read Message History` `Read Messages/View Channels` です。
+次の招待URLを、サーバー管理権限のあるアカウントで開いて追加してください。
+
+```
+https://discord.com/oauth2/authorize?client_id=1541725622173179954&permissions=199744&integration_type=0&scope=bot+applications.commands
+```
+
+追加後、投稿したいチャンネルで「ここに投稿」を送れば完了です。必要な権限は `Send Messages` `Mention Everyone` `Add Reactions` `Read Message History` `Read Messages/View Channels` です。
 
 ## セットアップ（Bot運営者向け）
 
