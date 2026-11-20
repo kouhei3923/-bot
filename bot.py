@@ -397,14 +397,12 @@ async def on_message(message: discord.Message):
     if message.guild is None:
         return
 
+    # メンション形式（Message Content Intentが必要）。反応しない環境があるため、同じ操作のスラッシュコマンドも用意している
     if "ここに投稿" in message.content:
         if not await _is_admin(message):
             await message.reply("❌ このコマンドはサーバー管理権限を持つ人のみ実行できます。")
             return
-        g = guild_state(message.guild.id)
-        g["channel_id"] = message.channel.id
-        save_state(state)
-        await message.reply(f"✅ 今後の投稿はこのチャンネル（{message.channel.mention}）に切り替えました。")
+        await message.reply(_set_post_channel(message.guild, message.channel))
         return
 
     if "来週休み" not in message.content:
@@ -416,10 +414,36 @@ async def on_message(message: discord.Message):
         await message.reply("❌ このコマンドはサーバー管理権限を持つ人のみ実行できます。")
         return
 
+    await message.reply(_set_skip_next(message.guild.id))
+
+
+def _set_post_channel(guild: discord.Guild, channel) -> str:
+    """このサーバーの自動投稿先を設定して、返信する文面を返す。"""
+    g = guild_state(guild.id)
+    g["channel_id"] = channel.id
+    save_state(state)
+    text = f"✅ 今後の投稿はこのチャンネル（{channel.mention}）に切り替えました。"
+    needed = {
+        "view_channel": "チャンネルを見る",
+        "send_messages": "メッセージを送信",
+        "add_reactions": "リアクションを追加",
+        "read_message_history": "メッセージ履歴を読む",
+        "mention_everyone": "@everyone を含む全員にメンション",
+    }
+    perms = channel.permissions_for(guild.me)
+    missing = [label for key, label in needed.items() if not getattr(perms, key)]
+    if missing:
+        text += "\n⚠️ Botに次の権限が足りません。投稿できない可能性があります: " + "、".join(missing)
+    return text
+
+
+def _set_skip_next(guild_id) -> str:
+    """次の月曜の投稿だけをお休みにして、返信する文面を返す。"""
+    g = guild_state(guild_id)
     target = next_monday(datetime.datetime.now(JST).date())
     g["skip_monday"] = target.isoformat()
     save_state(state)
-    await message.reply(
+    return (
         f"承知しました！{target.month}/{target.day}（月）の週のカスタムはお休みとして扱います。"
         f"{target.month}/{target.day}の投稿はスキップして、その次の月曜から再開します。"
     )
@@ -430,11 +454,37 @@ async def _guard(interaction: discord.Interaction):
     gid = str(interaction.guild_id)
     if guild_channel(guild_state(gid)) is None:
         await interaction.followup.send(
-            "❌ 投稿先チャンネルが設定されていません。投稿したいチャンネルでBotをメンションして「ここに投稿」と送ってください。",
+            "❌ 投稿先チャンネルが設定されていません。投稿したいチャンネルで `/custom_channel` を実行してください。",
             ephemeral=True,
         )
         return None
     return gid
+
+
+@bot.tree.command(
+    name="custom_channel",
+    description="【管理者用】自動投稿の投稿先チャンネルを設定します（省略するとこのチャンネル）",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="投稿先にするチャンネル（省略すると、このコマンドを実行したチャンネル）")
+@app_commands.rename(channel="チャンネル")
+async def custom_channel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    target = channel or interaction.channel
+    if not isinstance(target, discord.TextChannel):
+        await interaction.response.send_message(
+            "❌ スレッドなどには設定できません。通常のテキストチャンネルで実行するか、チャンネルを指定してください。",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_message(_set_post_channel(interaction.guild, target))
+
+
+@bot.tree.command(name="custom_skip_next", description="【管理者用】次の月曜のアンケート投稿をお休みにします")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+async def custom_skip_next(interaction: discord.Interaction):
+    await interaction.response.send_message(_set_skip_next(interaction.guild_id))
 
 
 @bot.tree.command(name="custom_post_now", description="【管理者用】カスタムアンケートを今すぐ投稿します")
@@ -491,7 +541,7 @@ def _format_settings(gid: str) -> str:
     channel = guild_channel(g)
     contact = f"<#{s['contact_channel_id']}>" if s.get("contact_channel_id") else "なし"
     return (
-        f"投稿先チャンネル: {channel.mention if channel else '未設定（Botをメンションして「ここに投稿」）'}\n"
+        f"投稿先チャンネル: {channel.mention if channel else '未設定（`/custom_channel` で設定）'}\n"
         f"集合時間: {s.get('meeting_time') or 'なし'}\n"
         f"集合場所: {s.get('meeting_place') or 'なし'}\n"
         f"連絡先チャンネル: {contact}\n"

@@ -9,8 +9,8 @@ discord.py製の日程調整専用Bot。複数のサーバーに入れて使え�
 
 ## 管理者向けの操作（サーバー管理権限 Manage Server が必要）
 
-- **Botにメンション＋「ここに投稿」と送信**　そのチャンネルをこのサーバーの投稿先として記憶します。以降の自動投稿はそこに出ます。**導入したらまずこれを1回送ってください。**
-- **Botにメンション＋「来週休み」と送信**　次の月曜の投稿だけをお休みにできます
+- `/custom_channel` 実行したチャンネル（または「チャンネル」で指定したチャンネル）をこのサーバーの投稿先として記憶します。以降の自動投稿はそこに出ます。**導入したらまずこれを1回実行してください。**（Botにメンション＋「ここに投稿」と送っても同じです）
+- `/custom_skip_next` 次の月曜の投稿だけをお休みにできます（Botにメンション＋「来週休み」と送っても同じです）
   - 送った日の次の月曜（月曜に送った場合は翌週の月曜）にアンケートの代わりに「今週のカスタムはお休みです」と自動投稿し、その週のリマインド・集計・開催メンションはスキップ
   - その次の月曜からは通常通りアンケートを投稿します
 - `/custom_setup` 開催日の発表文などの設定（指定した項目だけ変更。何も指定しないと現在の設定を表示）
@@ -30,7 +30,7 @@ discord.py製の日程調整専用Bot。複数のサーバーに入れて使え�
 https://discord.com/oauth2/authorize?client_id=1541725622173179954&permissions=199744&integration_type=0&scope=bot+applications.commands
 ```
 
-追加後、投稿したいチャンネルで「ここに投稿」を送れば完了です。必要な権限は `Send Messages` `Mention Everyone` `Add Reactions` `Read Message History` `Read Messages/View Channels` です。
+追加後、投稿したいチャンネルで `/custom_channel` を実行すれば完了です。必要な権限は `Send Messages` `Mention Everyone` `Add Reactions` `Read Message History` `Read Messages/View Channels` です。
 
 ## セットアップ（Bot運営者向け）
 
